@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>glitch segmentation</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.10/p5.min.js"></script>
+  <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      user-select: none;
+    }
+
+    body {
+      background: black;
+      overflow: hidden;
+      font-family: monospace;
+    }
+
+    /* Loading overlay */
+    #loading-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.9);
+      backdrop-filter: blur(4px);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      z-index: 200;
+      flex-direction: column;
+      gap: 20px;
+      transition: opacity 0.5s ease;
+      pointer-events: none;
+    }
+
+    .loading-text {
+      color: cyan;
+      font-size: 1.8rem;
+      text-align: center;
+      letter-spacing: 2px;
+    }
+
+    .loading-text small {
+      font-size: 1rem;
+      opacity: 0.8;
+    }
+
+    .spinner {
+      width: 50px;
+      height: 50px;
+      border: 4px solid rgba(0, 255, 255, 0.2);
+      border-top: 4px solid cyan;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      0% {
+        transform: rotate(0deg);
+      }
+
+      100% {
+        transform: rotate(360deg);
+      }
+    }
+
+    /* Control panel */
+    .controls {
+      position: fixed;
+      bottom: 24px;
+      left: 0;
+      right: 0;
+      display: flex;
+      justify-content: center;
+      gap: 20px;
+      z-index: 100;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+      pointer-events: none;
+    }
+
+    .controls.visible {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    button {
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(8px);
+      border: 1px solid cyan;
+      color: white;
+      font-size: 1rem;
+      font-weight: bold;
+      padding: 10px 28px;
+      border-radius: 60px;
+      cursor: pointer;
+      transition: 0.2s;
+      font-family: monospace;
+      letter-spacing: 1px;
+    }
+
+    button:active {
+      transform: scale(0.94);
+      background: cyan;
+      color: black;
+    }
+
+    @media (max-width: 600px) {
+      button {
+        padding: 8px 20px;
+        font-size: 0.85rem;
+      }
+
+      .controls {
+        gap: 16px;
+        bottom: 16px;
+      }
+
+      .loading-text {
+        font-size: 1.4rem;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div id="loading-overlay">
+    <div class="spinner"></div>
+    <div class="loading-text">
+      加载中...<br>
+      <small>Loading...</small>
+    </div>
+  </div>
+  <div class="controls" id="controls">
+    <button id="frontBtn">📱 FRONT</button>
+    <button id="backBtn">📷 BACK</button>
+  </div>
+
+  <script>
+    let bodySegmentation;
+    let video;
+    let segmentation;
+    let currentFacing = "user";
+    let hideTimeout;
+    let modelReady = false;
+    let firstResultReceived = false;
+
+    const options = { maskType: "person" };
+
+    // preload ml5 model (this runs before setup)
+    function preload() {
+      bodySegmentation = ml5.bodySegmentation("SelfieSegmentation", options);
+      // model loaded when preload finishes, but we wait for first segmentation result to hide loading
+    }
+
+    function setup() {
+      createCanvas(windowWidth, windowHeight);
+      pixelDensity(1);
+
+      // start camera (no audio)
+      initCamera("user");
+
+      // attach button events
+      select("#frontBtn").mousePressed(() => switchCamera("user"));
+      select("#backBtn").mousePressed(() => switchCamera("environment"));
+
+      // show controls on interaction, hide after 2 seconds
+      function showControls() {
+        const ctrl = select("#controls");
+        ctrl.addClass("visible");
+        if (hideTimeout) clearTimeout(hideTimeout);
+        hideTimeout = setTimeout(() => {
+          ctrl.removeClass("visible");
+        }, 2000);
+      }
+
+      window.addEventListener("touchstart", showControls);
+      window.addEventListener("mousemove", showControls);
+      showControls(); // show briefly on start
+    }
+
+    async function initCamera(facingMode) {
+      if (video && video.elt && video.elt.srcObject) {
+        let tracks = video.elt.srcObject.getTracks();
+        tracks.forEach(track => track.stop());
+      }
+
+      const constraints = {
+        video: { facingMode: { ideal: facingMode } },
+        audio: false
+      };
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        if (video) video.remove();
+        video = createCapture(stream);
+        video.size(width, height);
+        video.hide();
+
+        segmentation = null;
+        firstResultReceived = false;
+        // start detection (calls gotResults when ready)
+        bodySegmentation.detectStart(video, gotResults);
+        currentFacing = facingMode;
+      } catch (err) {
+        console.warn("Camera error, fallback:", err);
+        try {
+          const fallbackStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          if (video) video.remove();
+          video = createCapture(fallbackStream);
+          video.size(width, height);
+          video.hide();
+          bodySegmentation.detectStart(video, gotResults);
+        } catch (e) {
+          console.error("No camera access");
+          // If no camera, still hide loading after a timeout? better show error
+          document.getElementById("loading-overlay").innerHTML = '<div class="loading-text">❌ 无法访问摄像头<br><small>Camera access denied</small></div>';
+        }
+      }
+    }
+
+    function switchCamera(facingMode) {
+      if (facingMode === currentFacing) return;
+      initCamera(facingMode);
+      // Reset loading overlay visibility – it will hide again once we get a result
+      const overlay = document.getElementById("loading-overlay");
+      overlay.style.opacity = "1";
+      overlay.style.pointerEvents = "none";
+      firstResultReceived = false;
+    }
+
+    function gotResults(result) {
+      segmentation = result;
+      if (!firstResultReceived) {
+        firstResultReceived = true;
+        // hide loading overlay with fade
+        const overlay = document.getElementById("loading-overlay");
+        overlay.style.opacity = "0";
+        setTimeout(() => {
+          overlay.style.display = "none";
+        }, 500);
+      }
+    }
+
+    function draw() {
+      // Only draw if we have a segmentation result (or fallback raw video while loading)
+      if (!firstResultReceived) {
+        // Optionally show raw video as placeholder (but not needed)
+        if (video) {
+          push();
+          translate(width, 0);
+          scale(-1, 1);
+          image(video, 0, 0, width, height);
+          pop();
+        }
+        return;
+      }
+
+      // Glitchy draw: never clear canvas
+      if (segmentation && video) {
+        push();
+        translate(width, 0);
+        scale(-1, 1);
+        video.mask(segmentation.mask);
+        image(video, 0, 0, width, height);
+        pop();
+      } else if (video) {
+        push();
+        translate(width, 0);
+        scale(-1, 1);
+        image(video, 0, 0, width, height);
+        pop();
+      }
+
+      // extra glitch effects
+      if (frameCount % 60 === 0 && random(1) > 0.65) {
+        blendMode(ADD);
+        fill(100, 255, 100, 5);
+        noStroke();
+        rect(0, 0, width, height);
+        blendMode(BLEND);
+      }
+
+      if (frameCount % 37 === 0 && random(1) > 0.7) {
+        loadPixels();
+        for (let i = 0; i < pixels.length; i += 4) {
+          pixels[i] = pixels[i] + 15;
+        }
+        updatePixels();
+      }
+
+      if (frameCount % 23 === 0 && random() > 0.8) {
+        let sliceY = floor(random(height));
+        let sliceH = floor(random(8, 30));
+        copy(0, sliceY, width, sliceH, floor(random(-30, 30)), sliceY, width, sliceH);
+      }
+    }
+
+    function windowResized() {
+      resizeCanvas(windowWidth, windowHeight);
+    }
+
+    function touchStarted() {
+      return false;
+    }
+  </script>
+</body>
+
+</html>

@@ -18,10 +18,8 @@
     body {
       background: black;
       overflow: hidden;
-      font-family: monospace;
     }
 
-    /* Loading overlay */
     #loading-overlay {
       position: fixed;
       top: 0;
@@ -33,9 +31,9 @@
       display: flex;
       justify-content: center;
       align-items: center;
-      z-index: 200;
       flex-direction: column;
       gap: 20px;
+      z-index: 200;
       transition: opacity 0.5s ease;
       pointer-events: none;
     }
@@ -44,7 +42,6 @@
       color: cyan;
       font-size: 1.8rem;
       text-align: center;
-      letter-spacing: 2px;
     }
 
     .loading-text small {
@@ -71,7 +68,6 @@
       }
     }
 
-    /* Control panel */
     .controls {
       position: fixed;
       bottom: 24px;
@@ -82,7 +78,7 @@
       gap: 20px;
       z-index: 100;
       opacity: 0;
-      transition: opacity 0.2s ease;
+      transition: opacity 0.2s;
       pointer-events: none;
     }
 
@@ -97,13 +93,10 @@
       border: 1px solid cyan;
       color: white;
       font-size: 1rem;
-      font-weight: bold;
       padding: 10px 28px;
       border-radius: 60px;
       cursor: pointer;
-      transition: 0.2s;
       font-family: monospace;
-      letter-spacing: 1px;
     }
 
     button:active {
@@ -133,10 +126,7 @@
 <body>
   <div id="loading-overlay">
     <div class="spinner"></div>
-    <div class="loading-text">
-      加载中...<br>
-      <small>Loading...</small>
-    </div>
+    <div class="loading-text">加载中...<br><small>Loading...</small></div>
   </div>
   <div class="controls" id="controls">
     <button id="frontBtn">📱 FRONT</button>
@@ -149,44 +139,36 @@
     let segmentation;
     let currentFacing = "user";
     let hideTimeout;
-    let modelReady = false;
     let firstResultReceived = false;
+    let currentDetectionToken = 0;   // to ignore stale results
 
     const options = { maskType: "person" };
 
-    // preload ml5 model (this runs before setup)
     function preload() {
       bodySegmentation = ml5.bodySegmentation("SelfieSegmentation", options);
-      // model loaded when preload finishes, but we wait for first segmentation result to hide loading
     }
 
     function setup() {
       createCanvas(windowWidth, windowHeight);
       pixelDensity(1);
-
-      // start camera (no audio)
       initCamera("user");
 
-      // attach button events
       select("#frontBtn").mousePressed(() => switchCamera("user"));
       select("#backBtn").mousePressed(() => switchCamera("environment"));
 
-      // show controls on interaction, hide after 2 seconds
       function showControls() {
         const ctrl = select("#controls");
         ctrl.addClass("visible");
         if (hideTimeout) clearTimeout(hideTimeout);
-        hideTimeout = setTimeout(() => {
-          ctrl.removeClass("visible");
-        }, 2000);
+        hideTimeout = setTimeout(() => ctrl.removeClass("visible"), 2000);
       }
-
       window.addEventListener("touchstart", showControls);
       window.addEventListener("mousemove", showControls);
-      showControls(); // show briefly on start
+      showControls();
     }
 
     async function initCamera(facingMode) {
+      // stop previous stream tracks
       if (video && video.elt && video.elt.srcObject) {
         let tracks = video.elt.srcObject.getTracks();
         tracks.forEach(track => track.stop());
@@ -199,28 +181,65 @@
 
       try {
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
+
+        // 🔥 FIX MIC PROMPT: forcefully remove any audio tracks
+        stream.getAudioTracks().forEach(track => {
+          track.stop();
+          stream.removeTrack(track);
+        });
+
         if (video) video.remove();
         video = createCapture(stream);
         video.size(width, height);
         video.hide();
 
+        // increment token so old detection results are ignored
+        currentDetectionToken++;
+        const thisToken = currentDetectionToken;
+
+        // reset segmentation flag
         segmentation = null;
         firstResultReceived = false;
-        // start detection (calls gotResults when ready)
-        bodySegmentation.detectStart(video, gotResults);
+
+        // restart detection with new video
+        bodySegmentation.detectStart(video, (result) => {
+          // only accept result if it's from the current camera
+          if (thisToken === currentDetectionToken) {
+            segmentation = result;
+            if (!firstResultReceived) {
+              firstResultReceived = true;
+              const overlay = document.getElementById("loading-overlay");
+              overlay.style.opacity = "0";
+              setTimeout(() => { overlay.style.display = "none"; }, 500);
+            }
+          }
+        });
+
         currentFacing = facingMode;
       } catch (err) {
-        console.warn("Camera error, fallback:", err);
+        console.warn("Camera error:", err);
+        // fallback: default camera
         try {
           const fallbackStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          fallbackStream.getAudioTracks().forEach(t => { t.stop(); fallbackStream.removeTrack(t); });
           if (video) video.remove();
           video = createCapture(fallbackStream);
           video.size(width, height);
           video.hide();
-          bodySegmentation.detectStart(video, gotResults);
+          currentDetectionToken++;
+          const thisToken = currentDetectionToken;
+          bodySegmentation.detectStart(video, (result) => {
+            if (thisToken === currentDetectionToken) {
+              segmentation = result;
+              if (!firstResultReceived) {
+                firstResultReceived = true;
+                const overlay = document.getElementById("loading-overlay");
+                overlay.style.opacity = "0";
+                setTimeout(() => { overlay.style.display = "none"; }, 500);
+              }
+            }
+          });
         } catch (e) {
-          console.error("No camera access");
-          // If no camera, still hide loading after a timeout? better show error
           document.getElementById("loading-overlay").innerHTML = '<div class="loading-text">❌ 无法访问摄像头<br><small>Camera access denied</small></div>';
         }
       }
@@ -229,73 +248,37 @@
     function switchCamera(facingMode) {
       if (facingMode === currentFacing) return;
       initCamera(facingMode);
-      // Reset loading overlay visibility – it will hide again once we get a result
+      // show loading overlay again
       const overlay = document.getElementById("loading-overlay");
+      overlay.style.display = "flex";
       overlay.style.opacity = "1";
-      overlay.style.pointerEvents = "none";
       firstResultReceived = false;
     }
 
-    function gotResults(result) {
-      segmentation = result;
-      if (!firstResultReceived) {
-        firstResultReceived = true;
-        // hide loading overlay with fade
-        const overlay = document.getElementById("loading-overlay");
-        overlay.style.opacity = "0";
-        setTimeout(() => {
-          overlay.style.display = "none";
-        }, 500);
-      }
-    }
-
     function draw() {
-      // Only draw if we have a segmentation result (or fallback raw video while loading)
       if (!firstResultReceived) {
-        // Optionally show raw video as placeholder (but not needed)
+        // optional: show raw video while loading
         if (video) {
-          push();
-          translate(width, 0);
-          scale(-1, 1);
-          image(video, 0, 0, width, height);
-          pop();
+          push(); translate(width, 0); scale(-1, 1); image(video, 0, 0, width, height); pop();
         }
         return;
       }
 
-      // Glitchy draw: never clear canvas
       if (segmentation && video) {
-        push();
-        translate(width, 0);
-        scale(-1, 1);
-        video.mask(segmentation.mask);
-        image(video, 0, 0, width, height);
-        pop();
+        push(); translate(width, 0); scale(-1, 1); video.mask(segmentation.mask); image(video, 0, 0, width, height); pop();
       } else if (video) {
-        push();
-        translate(width, 0);
-        scale(-1, 1);
-        image(video, 0, 0, width, height);
-        pop();
+        push(); translate(width, 0); scale(-1, 1); image(video, 0, 0, width, height); pop();
       }
 
-      // extra glitch effects
+      // glitch effects
       if (frameCount % 60 === 0 && random(1) > 0.65) {
-        blendMode(ADD);
-        fill(100, 255, 100, 5);
-        noStroke();
-        rect(0, 0, width, height);
-        blendMode(BLEND);
+        blendMode(ADD); fill(100, 255, 100, 5); noStroke(); rect(0, 0, width, height); blendMode(BLEND);
       }
-
       if (frameCount % 37 === 0 && random(1) > 0.7) {
         loadPixels();
-        for (let i = 0; i < pixels.length; i += 4) {
-          pixels[i] = pixels[i] + 15;
-        }
+        for (let i = 0; i < pixels.length; i += 4) pixels[i] = pixels[i] + 15;
         updatePixels();
       }
-
       if (frameCount % 23 === 0 && random() > 0.8) {
         let sliceY = floor(random(height));
         let sliceH = floor(random(8, 30));
@@ -303,13 +286,8 @@
       }
     }
 
-    function windowResized() {
-      resizeCanvas(windowWidth, windowHeight);
-    }
-
-    function touchStarted() {
-      return false;
-    }
+    function windowResized() { resizeCanvas(windowWidth, windowHeight); }
+    function touchStarted() { return false; }
   </script>
 </body>
 

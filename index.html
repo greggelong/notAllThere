@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>glitch segmentation • toggle camera</title>
+  <title>glitch segmentation</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.10/p5.min.js"></script>
   <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
   <style>
@@ -20,6 +20,7 @@
       overflow: hidden;
     }
 
+    /* loading overlay */
     #loading-overlay {
       position: fixed;
       top: 0;
@@ -68,82 +69,27 @@
         transform: rotate(360deg);
       }
     }
-
-    .controls {
-      position: fixed;
-      bottom: 24px;
-      left: 0;
-      right: 0;
-      display: flex;
-      justify-content: center;
-      z-index: 100;
-      opacity: 0;
-      transition: opacity 0.2s;
-      pointer-events: none;
-    }
-
-    .controls.visible {
-      opacity: 1;
-      pointer-events: auto;
-    }
-
-    button {
-      background: rgba(0, 0, 0, 0.7);
-      backdrop-filter: blur(8px);
-      border: 1px solid cyan;
-      color: white;
-      font-size: 1rem;
-      padding: 10px 28px;
-      border-radius: 60px;
-      cursor: pointer;
-      font-family: monospace;
-      font-weight: bold;
-    }
-
-    button:active {
-      transform: scale(0.94);
-      background: cyan;
-      color: black;
-    }
-
-    @media (max-width: 600px) {
-      button {
-        padding: 8px 20px;
-        font-size: 0.85rem;
-      }
-
-      .controls {
-        bottom: 16px;
-      }
-
-      .loading-text {
-        font-size: 1.4rem;
-      }
-    }
   </style>
 </head>
 
 <body>
   <div id="loading-overlay">
     <div class="spinner"></div>
-    <div class="loading-text">加载中...<br><small>Loading...</small></div>
-  </div>
-  <div class="controls" id="controls">
-    <button id="toggleCamBtn">📱 FRONT</button>
+    <div class="loading-text">
+      加载中...<br>
+      <small>Loading...</small>
+    </div>
   </div>
 
   <script>
     let bodySegmentation;
-    let currentCapture = null;      // current p5 capture element
+    let capture;           // video capture
     let segmentation;
-    let currentFacing = "user";     // 'user' = front, 'environment' = back
     let firstResultReceived = false;
-    let hideTimeout;
-    let isSwitching = false;
-    let activeToken = 0;             // to ignore stale ml5 results
 
     const options = { maskType: "person" };
 
+    // preload ml5 model
     function preload() {
       bodySegmentation = ml5.bodySegmentation("SelfieSegmentation", options);
     }
@@ -152,154 +98,75 @@
       createCanvas(windowWidth, windowHeight);
       pixelDensity(1);
 
-      // Start with front camera
-      initCamera("user");
+      // Create capture with explicit NO audio – no microphone prompt
+      capture = createCapture({ audio: false, video: true });
+      capture.size(width, height);
+      capture.hide();
 
-      // Toggle button: switch between front/back
-      const toggleBtn = select("#toggleCamBtn");
-      const switchHandler = () => {
-        if (isSwitching) return;
-        const newFacing = currentFacing === "user" ? "environment" : "user";
-        initCamera(newFacing);
-        toggleBtn.html(newFacing === "user" ? "📱 FRONT" : "📷 BACK");
-      };
-      toggleBtn.mousePressed(switchHandler);
-      toggleBtn.touchStarted(switchHandler);  // explicit touch for mobile
-
-      // Auto-hide controls after 2s of inactivity
-      function showControls() {
-        const ctrl = select("#controls");
-        ctrl.addClass("visible");
-        if (hideTimeout) clearTimeout(hideTimeout);
-        hideTimeout = setTimeout(() => ctrl.removeClass("visible"), 2000);
-      }
-      window.addEventListener("touchstart", showControls);
-      window.addEventListener("mousemove", showControls);
-      showControls();
+      // Start segmentation detection
+      bodySegmentation.detectStart(capture, gotResults);
     }
 
-    // Completely recreate camera and restart ml5 detection
-    async function initCamera(facingMode) {
-      if (isSwitching) return;
-      isSwitching = true;
-
-      // Show loading overlay
-      const overlay = document.getElementById("loading-overlay");
-      overlay.style.display = "flex";
-      overlay.style.opacity = "1";
-      firstResultReceived = false;
-      segmentation = null;
-
-      // Stop previous capture and its tracks
-      if (currentCapture) {
-        if (currentCapture.elt && currentCapture.elt.srcObject) {
-          currentCapture.elt.srcObject.getTracks().forEach(track => track.stop());
-        }
-        currentCapture.remove();
-        currentCapture = null;
+    // Callback from ml5 segmentation
+    function gotResults(result) {
+      segmentation = result;
+      if (!firstResultReceived && result) {
+        firstResultReceived = true;
+        const overlay = document.getElementById("loading-overlay");
+        overlay.style.opacity = "0";
+        setTimeout(() => {
+          overlay.style.display = "none";
+        }, 500);
       }
-
-      // Increment token so old ml5 callbacks are ignored
-      activeToken++;
-      const thisToken = activeToken;
-
-      // Request new camera stream with facingMode
-      const constraints = {
-        video: { facingMode: { exact: facingMode } },
-        audio: false
-      };
-
-      try {
-        let stream = await navigator.mediaDevices.getUserMedia(constraints);
-        // Extra safety: kill any audio tracks
-        stream.getAudioTracks().forEach(t => { t.stop(); stream.removeTrack(t); });
-
-        // Create p5 capture from the stream
-        currentCapture = createCapture(stream);
-        currentCapture.size(width, height);
-        currentCapture.hide();
-
-        currentFacing = facingMode;
-
-        // Restart ml5 detection on this new capture
-        bodySegmentation.detectStart(currentCapture, (result) => {
-          if (thisToken === activeToken) {
-            segmentation = result;
-            if (!firstResultReceived && result) {
-              firstResultReceived = true;
-              const overlayEl = document.getElementById("loading-overlay");
-              overlayEl.style.opacity = "0";
-              setTimeout(() => { overlayEl.style.display = "none"; }, 500);
-            }
-          }
-        });
-
-      } catch (err) {
-        console.warn("Exact facingMode failed, trying ideal", err);
-        // Fallback: use ideal constraint
-        const fallbackConstraints = {
-          video: { facingMode: { ideal: facingMode } },
-          audio: false
-        };
-        try {
-          let stream = await navigator.mediaDevices.getUserMedia(fallbackConstraints);
-          stream.getAudioTracks().forEach(t => { t.stop(); stream.removeTrack(t); });
-          currentCapture = createCapture(stream);
-          currentCapture.size(width, height);
-          currentCapture.hide();
-          currentFacing = facingMode;
-
-          activeToken++;
-          const newToken = activeToken;
-          bodySegmentation.detectStart(currentCapture, (result) => {
-            if (newToken === activeToken) {
-              segmentation = result;
-              if (!firstResultReceived && result) {
-                firstResultReceived = true;
-                const overlayEl = document.getElementById("loading-overlay");
-                overlayEl.style.opacity = "0";
-                setTimeout(() => { overlayEl.style.display = "none"; }, 500);
-              }
-            }
-          });
-        } catch (e) {
-          console.error("Camera completely failed", e);
-          overlay.innerHTML = '<div class="loading-text">❌ 无法开启摄像头<br><small>Camera error</small></div>';
-          isSwitching = false;
-          return;
-        }
-      }
-
-      isSwitching = false;
     }
 
+    // draw – never clear canvas → glitch trail
     function draw() {
       if (!firstResultReceived) {
         // Show raw video while loading
-        if (currentCapture && currentCapture.elt.readyState >= 2) {
-          push(); translate(width, 0); scale(-1, 1); image(currentCapture, 0, 0, width, height); pop();
+        if (capture && capture.elt.readyState >= 2) {
+          push();
+          translate(width, 0);
+          scale(-1, 1);
+          image(capture, 0, 0, width, height);
+          pop();
         }
         return;
       }
 
-      if (segmentation && currentCapture) {
-        push(); translate(width, 0); scale(-1, 1);
-        currentCapture.mask(segmentation.mask);
-        image(currentCapture, 0, 0, width, height);
+      // Apply segmentation mask and draw
+      if (segmentation && capture) {
+        push();
+        translate(width, 0);
+        scale(-1, 1);
+        capture.mask(segmentation.mask);
+        image(capture, 0, 0, width, height);
         pop();
-      } else if (currentCapture) {
-        push(); translate(width, 0); scale(-1, 1); image(currentCapture, 0, 0, width, height); pop();
+      } else if (capture) {
+        push();
+        translate(width, 0);
+        scale(-1, 1);
+        image(capture, 0, 0, width, height);
+        pop();
       }
 
-      // Glitch effects
+      // Extra glitch effects (optional)
       if (frameCount % 60 === 0 && random(1) > 0.65) {
-        blendMode(ADD); fill(100, 255, 100, 5); noStroke(); rect(0, 0, width, height); blendMode(BLEND);
+        blendMode(ADD);
+        fill(100, 255, 100, 5);
+        noStroke();
+        rect(0, 0, width, height);
+        blendMode(BLEND);
       }
+
       if (frameCount % 37 === 0 && random(1) > 0.7) {
         loadPixels();
-        for (let i = 0; i < pixels.length; i += 4) pixels[i] = pixels[i] + 15;
+        for (let i = 0; i < pixels.length; i += 4) {
+          pixels[i] = pixels[i] + 15; // red shift
+        }
         updatePixels();
       }
+
       if (frameCount % 23 === 0 && random() > 0.8) {
         let sliceY = floor(random(height));
         let sliceH = floor(random(8, 30));
@@ -307,8 +174,13 @@
       }
     }
 
-    function windowResized() { resizeCanvas(windowWidth, windowHeight); }
-    function touchStarted() { return false; }
+    function windowResized() {
+      resizeCanvas(windowWidth, windowHeight);
+    }
+
+    function touchStarted() {
+      return false; // prevent zoom on mobile
+    }
   </script>
 </body>
 
